@@ -5,7 +5,7 @@ kernel, linux, mm, memory management, slab, kmalloc, kfree, use-after-free,
 null deref, oops, panic, BUG_ON, WARN_ON, RCU, spinlock, mutex, softirq,
 hardirq, interrupt, scheduler, cgroup, namespaces, syscall, ioctl, vfs,
 ext4, btrfs, xfs, netdev, skb, socket, tcp, udp, eBPF, kprobes, ftrace,
-kasan, ubsan, lockdep, syzbot, syzkaller
+kasan, ubsan, lockdep
 
 ## Key source locations
 - `mm/`                  — memory management (slab, vmalloc, mmap, OOM)

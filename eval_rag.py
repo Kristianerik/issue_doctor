@@ -134,7 +134,7 @@ def embed_texts(texts):
     try:
         if fmt == "new":
             r = requests.post(url, json={"model": EMBED_MODEL, "input": texts},
-                              timeout=max(30, len(texts)*2))
+                              timeout=max(120, len(texts)*5))
             if r.status_code == 200:
                 return r.json().get("embeddings", [[] for _ in texts])
         results = []

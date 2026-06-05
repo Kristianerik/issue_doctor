@@ -19,10 +19,36 @@ import tempfile
 import time
 from pathlib import Path
 
+try:
+    import requests
+except ImportError:
+    requests = None
+
+OLLAMA_HOST = "http://localhost:11434"
+OLLAMA_MODEL = "qwen3:14b"
+
+# ── Repo detection ───────────────────────────────────────────────────────────
+
+def detect_repo_type(repo_root: Path) -> str:
+    """
+    Detect which project a repo contains — pattern-based, no hardcoded paths.
+    Works on any machine regardless of where the repo is cloned.
+    """
+    name = repo_root.name.lower()
+    if "llvm" in name:
+        return "llvm"
+    if "cpython" in name or (repo_root / "Python" / "import.c").exists():
+        return "cpython"
+    if "linux" in name or (repo_root / "kernel" / "sched").exists():
+        return "linux"
+    return "unknown"
+
+
 # ── Ground truth cases ────────────────────────────────────────────────────────
 
 GROUND_TRUTH = [
     {
+        "repo": "llvm",
         "issue_number": 199506,
         "issue_url": "https://github.com/llvm/llvm-project/issues/199506",
         "fix_files": ["llvm/lib/Transforms/InstCombine/InstCombineAndOrXor.cpp"],
@@ -30,6 +56,7 @@ GROUND_TRUTH = [
         "description": "[InstCombine] Fix type mismatch in foldBitmaskMul",
     },
     {
+        "repo": "llvm",
         "issue_number": 198389,
         "issue_url": "https://github.com/llvm/llvm-project/issues/198389",
         "fix_files": ["llvm/lib/Transforms/InstCombine/InstCombineCompares.cpp"],
@@ -37,6 +64,7 @@ GROUND_TRUTH = [
         "description": "[InstCombine] Do not crash in compare of bitcast pattern",
     },
     {
+        "repo": "llvm",
         "issue_number": 199401,
         "issue_url": "https://github.com/llvm/llvm-project/issues/199401",
         "fix_files": ["llvm/lib/Transforms/InstCombine/InstCombineCalls.cpp"],
@@ -44,6 +72,7 @@ GROUND_TRUTH = [
         "description": "[InstCombine] Fix vector_reduce_mul(sext <n x i1>) for odd n",
     },
     {
+        "repo": "llvm",
         "issue_number": 170072,
         "issue_url": "https://github.com/llvm/llvm-project/issues/170072",
         "fix_files": ["clang/lib/Sema/SemaChecking.cpp"],
@@ -51,11 +80,20 @@ GROUND_TRUTH = [
         "description": "[Clang][Sema] Fix crash EvaluateForOverflow for UnaryOperator",
     },
     {
+        "repo": "llvm",
         "issue_number": 200263,
         "issue_url": "https://github.com/llvm/llvm-project/issues/200263",
         "fix_files": ["llvm/lib/Transforms/Vectorize/VectorCombine.cpp"],
         "fix_functions": ["scalarizeLoad", "runImpl"],
         "description": "[VectorCombine] Don't scalarize atomic loads",
+    },
+    {
+        "issue_number": 150633,
+        "issue_url": "https://github.com/python/cpython/issues/150633",
+        "repo": "cpython",
+        "fix_files": ["Python/import.c"],
+        "fix_functions": ["find_frozen", "look_up_frozen"],
+        "description": "[CPython] frozen module lookup fails on names containing null bytes",
     },
 ]
 
@@ -75,7 +113,7 @@ def run_diagnosis(url: str, repo_root: str, tool_path: str) -> str:
         result = subprocess.run(
             ["python", tool_path, "--url", url,
              "--repo", repo_root, "--no-skills", "--save-to", tmp_path],
-            capture_output=True, text=True, timeout=900,
+            capture_output=True, text=True, timeout=1200,
             encoding="utf-8", errors="replace", env=env,
         )
         if result.returncode != 0:
@@ -93,6 +131,87 @@ def run_diagnosis(url: str, repo_root: str, tool_path: str) -> str:
     finally:
         Path(tmp_path).unlink(missing_ok=True)
     return ""
+
+
+# ── Patch quality check ──────────────────────────────────────────────────────
+
+def check_patch_quality(text: str) -> dict:
+    """
+    Extract the draft patch from diagnosis text and ask the model to review it.
+    Returns verdict: VALID, SUSPECT, INVALID, or NO_PATCH.
+    """
+    # Extract first ```diff block
+    diff_match = re.search(r'```diff\n(.*?)```', text, re.DOTALL)
+    if not diff_match:
+        return {"patch_found": False, "patch_verdict": "NO_PATCH", "patch_reason": "No diff block in output"}
+
+    patch_text = diff_match.group(1).strip()
+    if not patch_text:
+        return {"patch_found": False, "patch_verdict": "NO_PATCH", "patch_reason": "Empty diff block"}
+
+    if requests is None:
+        return {"patch_found": True, "patch_verdict": "NO_PATCH", "patch_reason": "requests not available"}
+
+    # Truncate very large patches
+    if len(patch_text) > 3000:
+        patch_text = patch_text[:3000] + "\n...(truncated)"
+
+    prompt = f"""You are a code review assistant. Analyze this patch for logical errors only.
+
+Patch:
+{patch_text}
+
+Answer with exactly one of: VALID, SUSPECT, or INVALID
+Then on the next line, one sentence explaining why.
+
+VALID = patch is logically sound
+SUSPECT = patch may have issues but could be correct
+INVALID = patch has a clear logical error (null deref, dead code, wrong location, etc.)
+/think"""
+
+    try:
+        r = requests.post(
+            f"{OLLAMA_HOST}/api/chat",
+            json={
+                "model": OLLAMA_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "options": {"temperature": 0.1},
+            },
+            timeout=120,
+        )
+        if r.status_code != 200:
+            return {"patch_found": True, "patch_verdict": "NO_PATCH",
+                    "patch_reason": f"Ollama error {r.status_code}"}
+
+        response = r.json().get("message", {}).get("content", "").strip()
+
+        # Strip <think>...</think> blocks from qwen3 thinking mode
+        response = re.sub(r'<think>.*?</think>', '', response, flags=re.DOTALL).strip()
+
+        lines = [l.strip() for l in response.splitlines() if l.strip()]
+        verdict = "SUSPECT"
+        reason = response[:120]
+        for line in lines:
+            upper = line.upper()
+            if upper.startswith("VALID"):
+                verdict = "VALID"; break
+            elif upper.startswith("INVALID"):
+                verdict = "INVALID"; break
+            elif upper.startswith("SUSPECT"):
+                verdict = "SUSPECT"; break
+        # Get the reason from the next non-verdict line
+        for i, line in enumerate(lines):
+            if any(line.upper().startswith(v) for v in ("VALID", "INVALID", "SUSPECT")):
+                if i + 1 < len(lines):
+                    reason = lines[i + 1][:120]
+                break
+
+        return {"patch_found": True, "patch_verdict": verdict, "patch_reason": reason}
+
+    except Exception as e:
+        return {"patch_found": True, "patch_verdict": "NO_PATCH",
+                "patch_reason": f"Review failed: {type(e).__name__}"}
 
 
 # ── Scoring ───────────────────────────────────────────────────────────────────
@@ -187,11 +306,18 @@ def main():
             return
 
     print(f"Tool:  {tool_path}")
+    repo_type = detect_repo_type(Path(repo_root))
     print(f"Repo:  {repo_root}")
+    print(f"Type:  {repo_type}")
     print()
 
-    # Filter cases
-    cases = GROUND_TRUTH
+    # Filter cases — auto-detect which cases apply to this repo
+    cases = [c for c in GROUND_TRUTH if c.get("repo", "llvm") == repo_type]
+    if not cases:
+        print(f"No ground truth cases for repo type '{repo_type}'.")
+        print(f"Available repos: {sorted(set(c.get('repo','llvm') for c in GROUND_TRUTH))}")
+        return
+    print(f"Running {len(cases)} case(s) for repo type '{repo_type}'")
     if args.cases:
         nums = {int(n.strip()) for n in args.cases.split(",")}
         cases = [c for c in cases if c["issue_number"] in nums]
@@ -212,17 +338,23 @@ def main():
             continue
 
         s = score(text, case)
+        p = check_patch_quality(text)
         f_mark = "OK" if s["file_exact"] else ("~~" if s["file_match"] else "XX")
         fn_mark = "OK" if s["function_match"] else "XX"
         c_mark = "OK" if s["confidence_honest"] else "!!"
+        p_mark = {"VALID": "OK", "SUSPECT": "~~", "INVALID": "XX",
+                  "NO_PATCH": "--"}.get(p["patch_verdict"], "--")
 
         print(f"  File: {f_mark}  Function: {fn_mark}  Confidence honest: {c_mark}  "
+              f"Patch: {p_mark}({p['patch_verdict']})  "
               f"Warning: {'fired' if s['warning_fired'] else 'silent'}  "
               f"({elapsed:.0f}s)")
         if s["cited_files"]:
             print(f"  Cited files: {s['cited_files'][:2]}")
         if not s["file_exact"]:
             print(f"  Expected:    {case['fix_files'][0]}")
+        if p["patch_found"]:
+            print(f"  Patch:       {p['patch_verdict']} — {p['patch_reason'][:80]}")
         print()
 
         results.append({
@@ -230,6 +362,7 @@ def main():
             "description": case["description"],
             "fix_files": case["fix_files"],
             "scores": s,
+            "patch": p,
         })
 
     # Summary
@@ -242,10 +375,16 @@ def main():
         print("=" * 50)
         print("Output Quality Summary")
         print("=" * 50)
+        p_valid = sum(1 for r in scored if r.get("patch", {}).get("patch_verdict") == "VALID")
+        p_suspect = sum(1 for r in scored if r.get("patch", {}).get("patch_verdict") == "SUSPECT")
+        p_invalid = sum(1 for r in scored if r.get("patch", {}).get("patch_verdict") == "INVALID")
+        p_none = n - p_valid - p_suspect - p_invalid
         print(f"  Cases evaluated:     {n}")
         print(f"  File exact match:    {f_hits}/{n} ({100*f_hits//n}%)")
         print(f"  Function match:      {fn_hits}/{n} ({100*fn_hits//n}%)")
         print(f"  Confidence honest:   {honest}/{n} ({100*honest//n}%)")
+        print(f"  Patch quality:       {p_valid} VALID  {p_suspect} SUSPECT  "
+              f"{p_invalid} INVALID  {p_none} NO_PATCH")
 
     if args.output:
         out = args.output

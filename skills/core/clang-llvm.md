@@ -5,9 +5,25 @@ clang, llvm, codegen, frontend, backend, IR, RISC-V, RVV, vectorizer,
 loop vectorization, builtin, attribute, LTO, scalable vector, MLIR,
 TableGen, SelectionDAG, InstCombine, SLP, CFG, BasicBlock, MachineInstr,
 counted_by, object size, bdos, builtin_dynamic_object_size, flex array,
-MemberExpr, DeclRefExpr, ObjectSizeOffsetEvaluator, MemoryBuiltins
+MemberExpr, DeclRefExpr, ObjectSizeOffsetEvaluator, MemoryBuiltins,
+sema, Sema, SemaChecking, semantic, SemaDeclAttr, ExprConstant,
+EvaluateForOverflow, CheckForIntOverflow, crash-on-invalid, crash-on-valid,
+LValue, UnaryOperator, ASTContext, DiagnosticsEngine
 
 ## Key source locations — VERIFIED REAL PATHS
+
+### Sema — semantic analysis and expression evaluation
+- `clang/lib/Sema/SemaChecking.cpp`
+  - `CheckForIntOverflow()` — entry point for integer overflow checking
+  - `EvaluateForOverflow()` — evaluates expressions for overflow; crash bugs
+    often occur here when handling unusual AST nodes (UnaryOperator, etc.)
+  - Fix pattern: add a guard for the specific AST node type before evaluating
+- `clang/lib/Sema/SemaDecl.cpp` — declaration semantic checking
+- `clang/lib/Sema/SemaExpr.cpp` — expression semantic checking
+- `clang/lib/AST/ExprConstant.cpp`
+  - `LValue::addUnsizedArray()` — crash site for invalid/negative array sizes;
+    the FIX goes in the CALLER (SemaChecking.cpp), not here (see frame rule)
+  - `EvaluateAsRValue()`, `EvaluateAsConstantExpr()` — constant folding entry points
 
 ### Object size / counted_by (this is where __builtin_dynamic_object_size lives)
 - `clang/lib/Analysis/MemoryBuiltins.cpp`
@@ -117,15 +133,53 @@ Module re-optimised post-link. Causes:
 1. Per-TU assumption breaks cross-TU (inlining exposes UB hidden by ABI boundary)
 2. Attribute/annotation not serialised into bitcode → lost at link time
 
+## Patch completeness requirements
+A draft patch is NOT a mergeable patch. Every LLVM/Clang PR must include:
+
+### Tests are mandatory
+- Every fix needs a test that exercises the fixed code path
+- Reviewers WILL request tests — flag this in the diagnosis, not after PR submission
+- A patch without a test will not be merged regardless of correctness
+
+### Test locations by fix type
+- `clang/test/CodeGen/` — codegen regression tests (IR output checks)
+- `clang/test/Analysis/` — static analysis tests
+- `clang/test/Sema/` — semantic / attribute validation, error message checks
+- `clang/test/Frontend/` — frontend pipeline tests (PreprocessorOptions,
+  CompilerInstance, remapping, PCH, modules)
+- `clang/unittests/Frontend/` — C++ unit tests for frontend internals;
+  use when the bug involves internal state not easily triggered via .c input
+- `llvm/test/Transforms/` — optimisation pass tests (FileCheck on .ll input)
+
+### Test format
+- `.c`/`.cpp` input with `// RUN:` lines invoking clang, checked with FileCheck
+- Unit tests in `clang/unittests/` use GTest; mirror the structure of existing
+  tests in the same directory
+- For crash bugs: the test must trigger the crash on unfixed code and pass on
+  fixed code — use `// expected-no-diagnostics` or `// CHECK:` on the output
+
+### Fuzzer-triggered bugs — extra scrutiny required
+- Before writing a fix, verify the bug is reachable in normal usage
+- Fuzzers generate artificial inputs that may be impossible by construction
+- Ask: "Can a caller ever pass NULL/invalid input here in non-fuzzer usage?"
+- If the answer is no: the fix may be unnecessary; a test proving unreachability
+  is more valuable than a defensive null check
+- If the answer is yes: add both the fix AND a test that triggers the path
+
+### Frontend crash fixes (CompilerInstance, PreprocessorOptions)
+- Check all callers of the function before adding a null guard
+- If callers guarantee non-null by construction, the null check is dead code
+- The test should exercise `InitializeFileRemapping` or equivalent via a
+  realistic input (e.g. a PCH with remapped files), not just a unit test
+  asserting the guard fires
+
 ## Key test directories
 - `clang/test/CodeGen/` — codegen regression tests (add new test here for bdos fix)
 - `clang/test/Analysis/` — static analysis tests
 - `clang/test/Sema/` — semantic / attribute validation tests
 - `llvm/test/Transforms/` — optimisation pass tests
 
-## Subject matter experts (GitHub handles)
-- `@bwendling`      — object size, counted_by (primary contact for this bug)
-- `@nickdesaulniers` — clang frontend, kernel compatibility
-- `@topperc`        — RISC-V backend, RVV
-- `@fhahn`          — loop vectorizer
-- `@arsenm`         — generic IR, AMDGPU
+
+## Crash issues
+See crash diagnosis rules in the system prompt (prepended automatically for crash issues).
+Key files: `clang/lib/Frontend/CompilerInstance.cpp`, `clang/lib/AST/ExprConstant.cpp`
