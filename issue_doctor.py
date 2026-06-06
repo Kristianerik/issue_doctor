@@ -127,8 +127,9 @@ def main():
 
     forced = [s.strip() for s in args.skills.split(",")] if args.skills else None
     is_interactive = not (args.url or args.text or args.paste)
+    repo_root_path = args.repo if args.repo else None
     skill_contents, skill_names = resolve_skills(
-        issue_text, all_skills, forced, is_interactive)
+        issue_text, all_skills, forced, is_interactive, repo_root=repo_root_path)
     skill_keywords = get_skill_keywords(all_skills, skill_names)
 
     repo_context, used_rag = resolve_repo_context(

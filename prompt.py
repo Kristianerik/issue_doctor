@@ -216,9 +216,51 @@ def _parse_trigger_keywords(content):
     return [kw.strip().lower() for kw in re.split(r"[,\n]+", m.group(1).strip()) if kw.strip()]
 
 
-def auto_detect_skills(issue_text, all_skills):
+# ── Repo guards ───────────────────────────────────────────────────────────────
+# Pattern-based structural checks for repo-specific skills.
+#
+# Two-tier keyword system for skills that span multiple repo types:
+# - STRONG keywords: domain-specific enough to fire the skill in any repo
+# - WEAK keywords: generic terms that only fire if the repo guard passes
+#
+# Example: linux-kernel skill on an LLVM repo
+#   "kasan" (strong) → loads skill — LLVM issues can involve kernel sanitizers
+#   "mutex" (weak)   → blocked — too generic, not meaningful without kernel repo
+
+def _is_kernel_repo(repo_root: Path) -> bool:
+    """Linux kernel: three co-distinctive top-level directories."""
+    p = Path(repo_root)
+    return (p / "kernel").is_dir() and (p / "mm").is_dir() and (p / "fs").is_dir()
+
+
+def _is_web_repo(repo_root: Path) -> bool:
+    """Web/JS repo: has package.json or node_modules at root."""
+    p = Path(repo_root)
+    return (p / "package.json").exists() or (p / "node_modules").is_dir()
+
+
+# Repo guard functions keyed by skill name
+SKILL_REPO_GUARDS: dict = {
+    "linux-kernel": _is_kernel_repo,
+    "web-js":       _is_web_repo,
+}
+
+# Strong keywords that fire a skill regardless of repo structure.
+# These are specific enough that their presence alone justifies loading the skill.
+SKILL_STRONG_KEYWORDS: dict = {
+    "linux-kernel": {
+        "kmalloc", "kfree", "kzalloc", "vmalloc", "krealloc",
+        "bug_on", "warn_on", "panic", "oops", "kasan", "ubsan",
+        "lockdep", "rcu", "ebpf", "bpf", "slab", "softirq",
+        "hardirq", "cgroup", "syzbot", "syzkaller", "kselftest",
+    },
+}
+
+
+def auto_detect_skills(issue_text, all_skills, repo_root=None):
     """
-    Load a skill only if the issue text contains enough evidence.
+    Load a skill only if the issue text contains enough evidence AND
+    the repo guard (if any) passes.
 
     Rules:
     1. Any keyword >= 8 chars that matches fires the skill alone
@@ -227,13 +269,36 @@ def auto_detect_skills(issue_text, all_skills):
        (e.g. 'race condition', 'null deref', 'loop vectorization')
     3. Short keywords (< 8 chars) require 2+ matches to fire
        (prevents 'atomic', 'kernel', 'thread' false-positives in clang issues)
+    4. Repo guard: if a skill has a guard function, it must return True
+       for the skill to load regardless of keyword matches
     """
     text_lower = issue_text.lower()
     detected = []
     for name, (kws, _) in all_skills.items():
+        # Two-tier repo guard:
+        # 1. If repo passes the structural guard → allow all keywords (fast path)
+        # 2. If repo fails or is unknown → only strong keywords can fire the skill
+        guard = SKILL_REPO_GUARDS.get(name)
+        repo_passes_guard = (
+            guard is None or
+            (repo_root is not None and guard(Path(repo_root)))
+        )
+
         matched = [kw for kw in kws if kw in text_lower]
         if not matched:
             continue
+
+        # If repo guard failed, only allow genuinely domain-specific keywords
+        if not repo_passes_guard:
+            skill_strong = SKILL_STRONG_KEYWORDS.get(name, set())
+            strong_matched = [kw for kw in matched if kw in skill_strong]
+            if not strong_matched:
+                continue
+            # Strong keyword matched — load the skill
+            detected.append(name)
+            continue
+
+        # Repo guard passed (or skill has no guard) — standard keyword rules
         strong = [kw for kw in matched if len(kw) >= 8 or ' ' in kw]
         if strong:
             detected.append(name)
@@ -243,8 +308,8 @@ def auto_detect_skills(issue_text, all_skills):
     return detected
 
 
-def resolve_skills(issue_text, all_skills, forced, interactive):
-    detected = auto_detect_skills(issue_text, all_skills)
+def resolve_skills(issue_text, all_skills, forced, interactive, repo_root=None):
+    detected = auto_detect_skills(issue_text, all_skills, repo_root=repo_root)
     final_names = list(dict.fromkeys((forced or []) + detected))
     valid = set(all_skills.keys())
     final_names = [n for n in final_names if n in valid]

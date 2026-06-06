@@ -33,7 +33,7 @@ EMBED_DIMENSIONS  = 768
 CHUNK_SIZE_LINES  = 60   # eval-optimised: medium-loose won (100% recall@10)
 CHUNK_OVERLAP     = 20   # overlap=20 is the key factor vs overlap=10
 TOP_K_CHUNKS      = 12
-MAX_CONTEXT_CHARS = 24000
+MAX_CONTEXT_CHARS = 16000
 
 # ── File filtering ─────────────────────────────────────────────────────────────
 INDEXABLE_EXTENSIONS = {

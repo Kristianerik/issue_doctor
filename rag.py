@@ -94,21 +94,18 @@ def embed_texts(texts):
             resp = requests.post(url, json={"model": EMBED_MODEL, "input": texts},
                                  timeout=max(120, len(texts) * 5))
             if resp.status_code == 200:
-                embs = resp.json().get("embeddings", [])
-                if embs:
-                    return embs
-        # Fallback: embed one at a time
+                return resp.json().get("embeddings", [[] for _ in texts])
         results = []
         for t in texts:
             if fmt == "new1":
-                resp = requests.post(url, json={"model": EMBED_MODEL, "input": t}, timeout=60)
+                resp = requests.post(url, json={"model": EMBED_MODEL, "input": t}, timeout=30)
                 if resp.status_code == 200:
                     embs = resp.json().get("embeddings", [[]])
                     results.append(embs[0] if embs else [])
                 else:
                     results.append([])
             else:
-                resp = requests.post(url, json={"model": EMBED_MODEL, "prompt": t}, timeout=60)
+                resp = requests.post(url, json={"model": EMBED_MODEL, "prompt": t}, timeout=30)
                 results.append(resp.json().get("embedding", []) if resp.status_code == 200 else [])
         return results
     except Exception as e:
@@ -281,6 +278,8 @@ def init_index_schema(conn):
             indexed_at   TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_fv_filepath ON file_versions(filepath);
+        CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
+            USING fts5(content, filepath, content=chunks, content_rowid=id);
     """)
     conn.commit()
 
@@ -791,7 +790,7 @@ def build_index(repo_root, conn, force=False, max_index_files=3000,
 
     for batch_start in range(0, len(all_chunks), BATCH_SIZE):
         batch = all_chunks[batch_start:batch_start + BATCH_SIZE]
-        texts = [c["content"][:800] for c in batch]
+        texts = [c["content"][:1000] for c in batch]
         embeddings = embed_texts(texts)
 
         for chunk, emb in zip(batch, embeddings):
@@ -826,6 +825,11 @@ def build_index(repo_root, conn, force=False, max_index_files=3000,
         )
 
     total_now = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    # Rebuild FTS5 index from chunks table
+    try:
+        conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+    except Exception:
+        pass  # FTS rebuild failed — keyword search will fall back to table scan
     conn.execute("INSERT OR REPLACE INTO meta VALUES ('commit_hash',?)", (current_hash,))
     conn.execute("INSERT OR REPLACE INTO meta VALUES ('total_chunks',?)", (str(total_now),))
     conn.commit()
@@ -1016,9 +1020,51 @@ def keyword_search(keywords: list[str], conn: sqlite3.Connection,
         ))
 
     try:
-        all_chunks = conn.execute(
-            "SELECT id, filepath, start_line, end_line, content FROM chunks"
-        ).fetchall()
+        # Use FTS5 full-text index if available — sub-millisecond keyword search.
+        # Falls back to full table scan if FTS table doesn't exist yet
+        # (older indexes built before FTS support was added).
+        fts_rows = None
+        try:
+            # Query FTS5 for any chunk matching any keyword
+            fts_query = " OR ".join(f'"{k}"' for k in code_kws[:8])
+            fts_rows = conn.execute(
+                "SELECT c.id, c.filepath, c.start_line, c.end_line, c.content "
+                "FROM chunks_fts f "
+                "JOIN chunks c ON c.id = f.rowid "
+                "WHERE chunks_fts MATCH ?",
+                (fts_query,)
+            ).fetchall()
+        except Exception:
+            fts_rows = None  # FTS table not available, fall through
+
+        if fts_rows is not None:
+            all_chunks = fts_rows
+        else:
+            # Fallback for pre-FTS indexes: two-pass scan.
+            # Pass 1: load only (id, filepath) — cheap, no content.
+            # Pass 2: load full content only for rows whose filepath matches
+            #         a keyword token OR whose id is in a sampled set.
+            # This avoids loading 170MB of content for all 114k chunks.
+            fp_rows = conn.execute(
+                "SELECT id, filepath FROM chunks"
+            ).fetchall()
+            # Candidate ids: filepath contains a keyword token
+            candidate_ids = [
+                row_id for row_id, fp in fp_rows
+                if any(t in fp.lower().replace("\\", "/") for t in path_tokens)
+            ]
+            # Also sample ~5% of chunks to catch keyword hits in unmatched paths
+            sample_ids = [row_id for row_id, _ in fp_rows if row_id % 20 == 0]
+            fetch_ids = list(dict.fromkeys(candidate_ids + sample_ids))[:2000]
+            if fetch_ids:
+                ph = ",".join("?" * len(fetch_ids))
+                all_chunks = conn.execute(
+                    f"SELECT id, filepath, start_line, end_line, content "
+                    f"FROM chunks WHERE id IN ({ph})",
+                    fetch_ids
+                ).fetchall()
+            else:
+                all_chunks = []
     except Exception:
         return []
 

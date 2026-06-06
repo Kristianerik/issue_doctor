@@ -52,10 +52,10 @@ def stream_diagnosis(issue_text, system_prompt):
         "model": OLLAMA_MODEL,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": USER_TEMPLATE.format(issue_text=issue_text)},
+            {"role": "user",   "content": USER_TEMPLATE.format(issue_text=issue_text[:6000])},
         ],
         "stream": True,
-        "options": {"temperature": 0.15, "num_predict": 4096, "num_ctx": 16384},
+        "options": {"temperature": 0.15, "num_predict": 6000, "num_ctx": 16384},
     }
     console.print()
     console.print(Rule(f"[bold cyan]Diagnosis + Draft Patch  {OLLAMA_MODEL}"))
