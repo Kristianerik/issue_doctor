@@ -43,10 +43,10 @@ except ImportError:
     SQLITE_VEC_AVAILABLE = False
 
 import config
-from diagnosis import check_ollama, get_issue_text, save_report, stream_diagnosis, validate_confidence
+from diagnosis import check_ollama, get_issue_text, get_missing_cited_files, save_report, stream_diagnosis, validate_confidence
 from prompt import build_system_prompt, get_skill_keywords, load_all_skills, resolve_skills
 from query import resolve_repo_context
-from rag import check_embed_model_availability
+from rag import check_embed_model_availability, embed_files_on_demand, hybrid_retrieve, format_retrieved_chunks
 
 console = Console()
 
@@ -132,12 +132,41 @@ def main():
         issue_text, all_skills, forced, is_interactive, repo_root=repo_root_path)
     skill_keywords = get_skill_keywords(all_skills, skill_names)
 
-    repo_context, used_rag = resolve_repo_context(
+    repo_context, used_rag, rag_conn, repo_root = resolve_repo_context(
         args, issue_text, skill_contents, skill_keywords)
 
     system_prompt = build_system_prompt(skill_contents, repo_context, used_rag, issue_text=issue_text)
     diagnosis = stream_diagnosis(issue_text, system_prompt)
     diagnosis = validate_confidence(diagnosis, repo_context)
+
+    # On-demand retry: if cited files exist on disk but weren't retrieved,
+    # embed them now and re-diagnose once. Bounded to 1 retry.
+    if rag_conn is not None and repo_root is not None:
+        missing = get_missing_cited_files(diagnosis, repo_context, repo_root)
+        if missing:
+            console.print(f"[yellow]On-demand indexing {len(missing)} cited file(s)...[/]")
+            for f in missing:
+                console.print(f"  [dim]{f}[/]")
+            from pathlib import Path
+            from config import TOP_K_CHUNKS
+            added = embed_files_on_demand(missing, Path(repo_root), rag_conn)
+            if added > 0:
+                console.print("[bold cyan]Re-retrieving with updated index...[/]")
+                chunks, _ = hybrid_retrieve(
+                    issue_text, skill_keywords, rag_conn, top_k=TOP_K_CHUNKS
+                )
+                if chunks:
+                    repo_context = format_retrieved_chunks(chunks)
+                    system_prompt = build_system_prompt(
+                        skill_contents, repo_context, used_rag, issue_text=issue_text)
+                    console.print("[bold cyan]Re-diagnosing with retrieved source...[/]")
+                    diagnosis = stream_diagnosis(issue_text, system_prompt)
+                    diagnosis = validate_confidence(diagnosis, repo_context)
+        if rag_conn:
+            try:
+                rag_conn.close()
+            except Exception:
+                pass
 
     if args.save_to:
         with open(args.save_to, "w", encoding="utf-8") as f:

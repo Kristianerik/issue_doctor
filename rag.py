@@ -1137,6 +1137,65 @@ def retrieve_chunks(query, conn, top_k=TOP_K_CHUNKS):
     return retrieve_chunks_vector(query, conn, top_k)
 
 
+def embed_files_on_demand(filepaths: list, repo_root, conn) -> int:
+    """
+    Embed a small set of specific files and add them to the existing index.
+    Used for on-demand indexing when cited files are missing from retrieved chunks.
+    Returns the number of new chunks embedded.
+    """
+    if not filepaths:
+        return 0
+    import datetime
+    all_chunks = []
+    for fp in filepaths:
+        path = Path(fp) if Path(fp).is_absolute() else repo_root / fp
+        if path.exists() and path.suffix in INDEXABLE_EXTENSIONS:
+            # Remove any existing chunks for this file first
+            rel = str(path.relative_to(repo_root)).replace("\\", "/")
+            old_ids = [r[0] for r in conn.execute(
+                "SELECT id FROM chunks WHERE filepath=?", (rel,)
+            ).fetchall()]
+            if old_ids:
+                ph = ",".join("?" * len(old_ids))
+                conn.execute(f"DELETE FROM chunk_embeddings WHERE rowid IN ({ph})", old_ids)
+                conn.execute("DELETE FROM chunks WHERE filepath=?", (rel,))
+            all_chunks.extend(chunk_file(path, repo_root))
+
+    if not all_chunks:
+        return 0
+
+    console.print(f"[dim]  On-demand embedding {len(all_chunks)} chunks "
+                  f"from {len(filepaths)} file(s)...[/]")
+    BATCH_SIZE = 16
+    total = 0
+    for i in range(0, len(all_chunks), BATCH_SIZE):
+        batch = all_chunks[i:i+BATCH_SIZE]
+        embeddings = embed_texts([c["content"][:1000] for c in batch])
+        for chunk, emb in zip(batch, embeddings):
+            if not emb or len(emb) != EMBED_DIMENSIONS:
+                continue
+            cur = conn.execute(
+                "INSERT INTO chunks (filepath, start_line, end_line, content) VALUES (?,?,?,?)",
+                (chunk["filepath"], chunk["start_line"], chunk["end_line"], chunk["content"])
+            )
+            conn.execute(
+                "INSERT INTO chunk_embeddings (rowid, embedding) VALUES (?,?)",
+                (cur.lastrowid, vec_to_blob(emb))
+            )
+            total += 1
+    conn.commit()
+
+    # Rebuild FTS5 index if available
+    try:
+        conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+        conn.commit()
+    except Exception:
+        pass
+
+    console.print(f"[dim]  On-demand: {total} chunks embedded[/]")
+    return total
+
+
 def hybrid_retrieve(
     issue_text: str,
     skill_keywords: list[str],

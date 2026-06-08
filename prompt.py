@@ -239,10 +239,17 @@ def _is_web_repo(repo_root: Path) -> bool:
     return (p / "package.json").exists() or (p / "node_modules").is_dir()
 
 
+def _is_cpython_repo(repo_root: Path) -> bool:
+    """CPython: Python/, Objects/, and Include/ co-exist only in CPython."""
+    p = Path(repo_root)
+    return (p / "Python").is_dir() and (p / "Objects").is_dir() and (p / "Include").is_dir()
+
+
 # Repo guard functions keyed by skill name
 SKILL_REPO_GUARDS: dict = {
     "linux-kernel": _is_kernel_repo,
     "web-js":       _is_web_repo,
+    "cpython":      _is_cpython_repo,
 }
 
 # Strong keywords that fire a skill regardless of repo structure.

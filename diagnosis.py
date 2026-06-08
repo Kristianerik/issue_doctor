@@ -174,6 +174,53 @@ def get_issue_text(args):
 
 # ── Report saving ──────────────────────────────────────────────────────────────
 
+def get_missing_cited_files(diagnosis: str, repo_context: str,
+                             repo_root) -> list:
+    """
+    Find files cited in the diagnosis that exist on disk but were not
+    in the retrieved chunks. These are candidates for on-demand indexing.
+    Returns list of repo-relative paths that exist in the repo.
+    """
+    if not repo_root:
+        return []
+
+    from pathlib import Path
+    import re
+
+    # Extract cited files from diagnosis (same patterns as validate_confidence)
+    cited = set()
+    for pat in [
+        r"`([^`\n]{3,80}\.[ch](?:pp?)?)`",
+        r"--- a/([^\n]+\.[ch](?:pp?)?)",
+        r"\*\*(?:File|File Path|Exact file path)[:\s*]+`?([^\n`\s]+\.[ch](?:pp?)?)`?",
+    ]:
+        cited.update(re.findall(pat, diagnosis, re.IGNORECASE))
+
+    if not cited:
+        return []
+
+    # Which cited files were NOT in retrieved chunks?
+    retrieved = set(re.findall(r"### ([^\n]+\.[ch](?:pp?)?)", repo_context or ""))
+    retrieved_basenames = {f.split("/")[-1] for f in retrieved}
+
+    missing = []
+    repo_path = Path(repo_root)
+    for cited_file in cited:
+        basename = cited_file.strip().split("/")[-1]
+        if basename in retrieved_basenames:
+            continue  # already retrieved
+        # Check if file exists anywhere in the repo
+        matches = list(repo_path.rglob(basename))
+        for match in matches[:1]:
+            try:
+                rel = str(match.relative_to(repo_path)).replace("\\", "/")
+                missing.append(rel)
+            except ValueError:
+                pass
+
+    return missing
+
+
 def save_report(diagnosis, issue_text, skill_names, used_rag):
     if Prompt.ask("\nSave report?", choices=["y","n"], default="n") == "y":
         filename = Prompt.ask("Filename", default=f"diagnosis_{int(time.time())}.md")
