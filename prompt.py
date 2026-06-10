@@ -158,7 +158,8 @@ def is_crash_issue(issue_text: str) -> bool:
 # ── System prompt builder ──────────────────────────────────────────────────────
 
 def build_system_prompt(skills, repo_context, used_rag,
-                        issue_text="", crash_context="", commit_context=""):
+                        issue_text="", crash_context="", commit_context="",
+                        related_issues_context=""):
     prompt = ""
 
     # Prepend crash guidance BEFORE retrieved source for crash issues.
@@ -188,6 +189,17 @@ def build_system_prompt(skills, repo_context, used_rag,
             + "Use these as context for the fix pattern and location.\n"
             + "=" * 60 + "\n\n"
             + commit_context + "\n\n"
+            + "=" * 60 + "\n\n"
+        )
+
+    # Inject related issues
+    if related_issues_context:
+        prompt += (
+            "# RELATED ISSUES\n"
+            + "=" * 60 + "\n"
+            + "Closed issues mentioning the same functions.\n"
+            + "=" * 60 + "\n\n"
+            + related_issues_context + "\n\n"
             + "=" * 60 + "\n\n"
         )
 

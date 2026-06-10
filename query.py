@@ -125,18 +125,18 @@ def keyword_scan_fallback(repo_root, issue_text, skill_keywords, skill_contents,
 
 def resolve_repo_context(args, issue_text, skill_contents, skill_keywords):
     if args.no_repo:
-        return None, False, None, None
+        return None, False, None, None, []
     repo_root = None
     if args.repo:
         repo_root = Path(args.repo).resolve()
         if not repo_root.exists():
             console.print(f"[red]--repo path does not exist: {repo_root}[/]")
-            return None, False, None, None
+            return None, False, None, None, []
     else:
         repo_root = detect_git_root(Path.cwd())
         if not repo_root:
             console.print("[dim]No local git repo detected.[/]")
-            return None, False, None, None
+            return None, False, None, None, []
         console.print(f"[dim]Auto-detected repo: {repo_root}[/]")
 
     if SQLITE_VEC_AVAILABLE and check_embed_model_availability():
@@ -180,13 +180,14 @@ def resolve_repo_context(args, issue_text, skill_contents, skill_keywords):
                 )
                 for f in files_found:
                     console.print(f"  [dim]{f}[/]")
+                retrieved_files = list(dict.fromkeys(c['filepath'] for c in chunks))
                 context = format_retrieved_chunks(chunks)
                 # Return conn open for potential on-demand retry
-                return context, True, conn, repo_root
+                return context, True, conn, repo_root, retrieved_files
             else:
                 console.print("[yellow]Hybrid retrieval returned no chunks.[/]")
                 conn.close()
 
     console.print("[dim]Using keyword-based file scan (no RAG).[/]")
     context = keyword_scan_fallback(repo_root, issue_text, skill_keywords, skill_contents)
-    return context, False, None, None
+    return context, False, None, None, []

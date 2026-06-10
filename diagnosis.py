@@ -69,23 +69,42 @@ def investigate_crash_issue(issue_text: str, repo_root) -> str:
         return ""
 
 
-def get_commit_history_context(repo_context: str, repo_root) -> str:
+def get_commit_history_context(retrieved_files: list, repo_root) -> str:
     """
-    Extract retrieved file paths from repo_context and mine their commit history.
+    Mine recent bug-fix commits for the retrieved files.
+    retrieved_files: list of repo-relative filepath strings from RAG.
     Fails silently — returns empty string on any error.
     """
-    if not repo_context or not repo_root:
+    if not retrieved_files or not repo_root:
         return ""
     try:
-        import re
         from pathlib import Path
         from agents.commit_history import get_commit_history
-        # Extract file paths from the formatted chunks (### filepath lines)
-        files = re.findall(r"### ([^\n]+\.[ch](?:pp?)?)", repo_context)
-        if not files:
+        return get_commit_history(retrieved_files, Path(repo_root))
+    except Exception:
+        return ""
+
+
+def get_related_issues_context(issue_text: str, retrieved_files: list,
+                                issue_url: str = "") -> str:
+    """
+    Search GitHub for related closed issues. Extracts owner/repo from the
+    issue text header or issue_url.
+    retrieved_files: list of repo-relative filepath strings from RAG.
+    Fails silently.
+    """
+    try:
+        import re
+        from agents.related_issues import get_related_issues
+        # Extract owner/repo from "Repository: owner/repo" header
+        m = re.search(r"Repository:\s*([^/\s]+)/([^\s\n]+)", issue_text)
+        if not m and issue_url:
+            m = re.search(r"github\.com/([^/]+)/([^/]+)/issues", issue_url)
+        if not m:
             return ""
-        return get_commit_history(files, Path(repo_root))
-    except Exception as e:
+        owner, repo = m.group(1).strip(), m.group(2).strip()
+        return get_related_issues(issue_text, retrieved_files, owner, repo)
+    except Exception:
         return ""
 
 
