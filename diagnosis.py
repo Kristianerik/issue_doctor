@@ -69,6 +69,26 @@ def investigate_crash_issue(issue_text: str, repo_root) -> str:
         return ""
 
 
+def get_commit_history_context(repo_context: str, repo_root) -> str:
+    """
+    Extract retrieved file paths from repo_context and mine their commit history.
+    Fails silently — returns empty string on any error.
+    """
+    if not repo_context or not repo_root:
+        return ""
+    try:
+        import re
+        from pathlib import Path
+        from agents.commit_history import get_commit_history
+        # Extract file paths from the formatted chunks (### filepath lines)
+        files = re.findall(r"### ([^\n]+\.[ch](?:pp?)?)", repo_context)
+        if not files:
+            return ""
+        return get_commit_history(files, Path(repo_root))
+    except Exception as e:
+        return ""
+
+
 def stream_diagnosis(issue_text, system_prompt):
     payload = {
         "model": OLLAMA_MODEL,

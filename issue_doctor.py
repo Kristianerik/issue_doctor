@@ -43,7 +43,7 @@ except ImportError:
     SQLITE_VEC_AVAILABLE = False
 
 import config
-from diagnosis import check_ollama, get_issue_text, get_missing_cited_files, investigate_crash_issue, save_report, stream_diagnosis, validate_confidence
+from diagnosis import check_ollama, get_commit_history_context, get_issue_text, get_missing_cited_files, investigate_crash_issue, save_report, stream_diagnosis, validate_confidence
 from prompt import build_system_prompt, get_skill_keywords, load_all_skills, resolve_skills
 from query import resolve_repo_context
 from rag import check_embed_model_availability, embed_files_on_demand, hybrid_retrieve, format_retrieved_chunks
@@ -137,10 +137,12 @@ def main():
 
     # Run crash investigator after check_ollama so qwen3:14b is already loaded
     crash_context = investigate_crash_issue(issue_text, repo_root)
+    commit_context = get_commit_history_context(repo_context, repo_root)
 
     system_prompt = build_system_prompt(
         skill_contents, repo_context, used_rag,
-        issue_text=issue_text, crash_context=crash_context)
+        issue_text=issue_text, crash_context=crash_context,
+        commit_context=commit_context)
     diagnosis = stream_diagnosis(issue_text, system_prompt)
     diagnosis = validate_confidence(diagnosis, repo_context)
 
@@ -162,9 +164,11 @@ def main():
                 )
                 if chunks:
                     repo_context = format_retrieved_chunks(chunks)
+                    commit_context = get_commit_history_context(repo_context, repo_root)
                     system_prompt = build_system_prompt(
                         skill_contents, repo_context, used_rag,
-                        issue_text=issue_text, crash_context=crash_context)
+                        issue_text=issue_text, crash_context=crash_context,
+                        commit_context=commit_context)
                     console.print("[bold cyan]Re-diagnosing with retrieved source...[/]")
                     diagnosis = stream_diagnosis(issue_text, system_prompt)
                     diagnosis = validate_confidence(diagnosis, repo_context)
