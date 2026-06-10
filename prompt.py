@@ -157,7 +157,8 @@ def is_crash_issue(issue_text: str) -> bool:
 
 # ── System prompt builder ──────────────────────────────────────────────────────
 
-def build_system_prompt(skills, repo_context, used_rag, issue_text=""):
+def build_system_prompt(skills, repo_context, used_rag,
+                        issue_text="", crash_context=""):
     prompt = ""
 
     # Prepend crash guidance BEFORE retrieved source for crash issues.
@@ -165,6 +166,18 @@ def build_system_prompt(skills, repo_context, used_rag, issue_text=""):
     # matching the original design intent.
     if issue_text and is_crash_issue(issue_text):
         prompt += CRASH_GUIDANCE + "\n"
+
+    # Inject crash investigation results if available
+    if crash_context:
+        prompt += (
+            "# CRASH INVESTIGATION\n"
+            + "=" * 60 + "\n"
+            + "Deterministic + LLM-guided analysis of crash frames.\n"
+            + "Use this to ground your fix location hypothesis.\n"
+            + "=" * 60 + "\n\n"
+            + crash_context + "\n\n"
+            + "=" * 60 + "\n\n"
+        )
 
     if repo_context:
         method = "semantic RAG" if used_rag else "keyword scan"

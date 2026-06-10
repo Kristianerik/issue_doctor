@@ -47,6 +47,28 @@ def check_ollama():
 
 # ── Streaming diagnosis ────────────────────────────────────────────────────────
 
+def investigate_crash_issue(issue_text: str, repo_root) -> str:
+    """
+    Run the crash investigator agent. Called after check_ollama() so
+    qwen3:14b is already loaded when the agent's LLM call fires.
+    Fails silently — returns empty string on any error.
+    """
+    from prompt import is_crash_issue
+    if not issue_text or not repo_root or not is_crash_issue(issue_text):
+        return ""
+    try:
+        from pathlib import Path
+        from agents.crash_investigator import investigate_crash
+        console.print("[dim]Running crash investigator...[/]")
+        result = investigate_crash(issue_text, Path(repo_root))
+        if result:
+            console.print("[dim]  Crash investigation complete[/]")
+        return result
+    except Exception as e:
+        console.print(f"[dim]  Crash investigator unavailable: {e}[/]")
+        return ""
+
+
 def stream_diagnosis(issue_text, system_prompt):
     payload = {
         "model": OLLAMA_MODEL,
