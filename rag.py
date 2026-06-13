@@ -1244,23 +1244,39 @@ def hybrid_retrieve(
     # This is general: any file named in a crash stacktrace is highly likely
     # to contain the crash site or its immediate caller.
     stacktrace_forced: list[dict] = []
-    frame_file_pairs = re.findall(
-        r'#([0-9]+)\s+0x[0-9a-f]+[^\n]*\b([A-Za-z][\w]+\.(?:cpp|h|inc|c)):\d+',
+    # Extract (frame_num, filename, line_number) — use line number to select
+    # the chunk containing the exact crash location rather than LIMIT 3.
+    frame_file_line_pairs = re.findall(
+        r'#([0-9]+)\s+0x[0-9a-f]+[^\n]*\b([A-Za-z][\w]+\.(?:cpp|h|inc|c)):(\d+)',
         issue_text
     )
-    forced_basenames = {
-        fname for fnum, fname in frame_file_pairs if int(fnum) >= 4
-    }
-    if forced_basenames:
-        console.print(f"[dim]  Stacktrace-forcing chunks from: {sorted(forced_basenames)}[/]")
-        for basename in forced_basenames:
+    # Group by filename → take the lowest frame number's line for each file
+    forced: dict = {}  # basename → line_number
+    for fnum, fname, lineno in frame_file_line_pairs:
+        if int(fnum) >= 4 and fname not in forced:
+            forced[fname] = int(lineno)
+
+    if forced:
+        console.print(f"[dim]  Stacktrace-forcing chunks from: {sorted(forced.keys())}[/]")
+        for basename, lineno in forced.items():
+            # Try to find the chunk containing the exact crash line
             rows = conn.execute(
                 """SELECT c.filepath, c.start_line, c.end_line, c.content
                    FROM chunks c
                    WHERE c.filepath LIKE ?
-                   LIMIT 3""",
-                (f'%{basename}',)
+                   AND c.start_line <= ? AND c.end_line >= ?
+                   LIMIT 1""",
+                (f'%{basename}', lineno, lineno)
             ).fetchall()
+            if not rows:
+                # Fall back to first chunk in the file
+                rows = conn.execute(
+                    """SELECT c.filepath, c.start_line, c.end_line, c.content
+                       FROM chunks c
+                       WHERE c.filepath LIKE ?
+                       LIMIT 1""",
+                    (f'%{basename}',)
+                ).fetchall()
             for r in rows:
                 stacktrace_forced.append({
                     "filepath": r[0], "start_line": r[1],
