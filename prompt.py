@@ -159,7 +159,8 @@ def is_crash_issue(issue_text: str) -> bool:
 
 def build_system_prompt(skills, repo_context, used_rag,
                         issue_text="", crash_context="", commit_context="",
-                        related_issues_context=""):
+                        related_issues_context="", test_coverage_context="",
+                        godbolt_context=""):
     prompt = ""
 
     # Prepend crash guidance BEFORE retrieved source for crash issues.
@@ -200,6 +201,29 @@ def build_system_prompt(skills, repo_context, used_rag,
             + "Closed issues mentioning the same functions.\n"
             + "=" * 60 + "\n\n"
             + related_issues_context + "\n\n"
+            + "=" * 60 + "\n\n"
+        )
+
+    # Inject test coverage
+    if test_coverage_context:
+        prompt += (
+            "# EXISTING TESTS\n"
+            + "=" * 60 + "\n"
+            + "Test files covering the retrieved source files.\n"
+            + "=" * 60 + "\n\n"
+            + test_coverage_context + "\n\n"
+            + "=" * 60 + "\n\n"
+        )
+
+    # Inject Godbolt reproducer if available — put it early so the model
+    # sees the exact failing code before reading the source
+    if godbolt_context:
+        prompt += (
+            "# REPRODUCER\n"
+            + "=" * 60 + "\n"
+            + "Exact source code from the issue's Godbolt link.\n"
+            + "=" * 60 + "\n\n"
+            + godbolt_context + "\n\n"
             + "=" * 60 + "\n\n"
         )
 

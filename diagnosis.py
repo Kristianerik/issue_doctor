@@ -108,6 +108,34 @@ def get_related_issues_context(issue_text: str, retrieved_files: list,
         return ""
 
 
+def get_test_coverage_context(issue_text: str, retrieved_files: list,
+                               repo_root) -> str:
+    """
+    Find test files relevant to this issue using keywords from issue text.
+    Fails silently — returns empty string on any error.
+    """
+    if not issue_text or not repo_root:
+        return ""
+    try:
+        from pathlib import Path
+        from agents.test_coverage import get_test_coverage
+        return get_test_coverage(issue_text, retrieved_files, Path(repo_root))
+    except Exception:
+        return ""
+
+
+def get_godbolt_context(issue_text: str) -> str:
+    """
+    Fetch reproducer source from a Godbolt URL in the issue text.
+    Fails silently — returns empty string on any error.
+    """
+    try:
+        from agents.godbolt import get_godbolt_context as _get
+        return _get(issue_text)
+    except Exception:
+        return ""
+
+
 def stream_diagnosis(issue_text, system_prompt):
     payload = {
         "model": OLLAMA_MODEL,

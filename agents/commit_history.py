@@ -67,8 +67,9 @@ def _mine_history(retrieved_files: list, repo_root: Path) -> str:
                 [
                     "git", "log", "--oneline",
                     "--since=6 months ago",
-                    "--grep=fix\\|crash\\|assert\\|revert\\|regression",
-                    "-i",   # case-insensitive grep
+                    "-E",
+                    "--grep=fix|crash|assert|revert|regression",
+                    "-i",   # case-insensitive
                     "-5",   # max 5 commits per file
                     "--", filepath,
                 ],

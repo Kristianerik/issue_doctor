@@ -8,9 +8,7 @@ counted_by, object size, bdos, builtin_dynamic_object_size, flex array,
 MemberExpr, DeclRefExpr, ObjectSizeOffsetEvaluator, MemoryBuiltins,
 sema, Sema, SemaChecking, semantic, SemaDeclAttr, ExprConstant,
 EvaluateForOverflow, CheckForIntOverflow, crash-on-invalid, crash-on-valid,
-LValue, UnaryOperator, ASTContext, DiagnosticsEngine,
-pragma clang module, module build, ForwardingDiagnosticConsumer,
-TextDiagnostic, highlightLines, CheckPoint, createModuleFromSource
+LValue, UnaryOperator, ASTContext, DiagnosticsEngine
 
 ## Key source locations — VERIFIED REAL PATHS
 
@@ -30,9 +28,13 @@ TextDiagnostic, highlightLines, CheckPoint, createModuleFromSource
 ### Object size / counted_by (this is where __builtin_dynamic_object_size lives)
 - `clang/lib/Analysis/MemoryBuiltins.cpp`
   - `tryEvaluateBuiltinObjectSize()` — entry point for __bdos/__bos lowering
-  - `ObjectSizeOffsetEvaluator::visitMember()` — handles MemberExpr
-  - `ObjectSizeOffsetEvaluator::visitDeclRefExpr()` — handles direct variable refs
-  - `ObjectSizeOffsetEvaluator::getCountedBySize()` — extracts counted_by value
+  - `ObjectSizeOffsetEvaluator::visitMember()` — handles MemberExpr; THIS is where
+    the pointer-vs-direct divergence occurs. Pointer path walks counted_by;
+    direct DeclRefExpr path falls through to static layout size.
+  - `ObjectSizeOffsetEvaluator::visitDeclRefExpr()` — handles direct variable refs;
+    does NOT currently check counted_by on the referenced decl
+  - `ObjectSizeOffsetEvaluator::getCountedBySize()` — extracts counted_by value;
+    only called from the pointer path today
 - `clang/include/clang/Analysis/MemoryBuiltins.h` — declarations
 - `clang/lib/CodeGen/CGBuiltin.cpp`
   - `CodeGenFunction::emitBuiltinObjectSize()` — lowers to IR after Sema
@@ -49,14 +51,17 @@ TextDiagnostic, highlightLines, CheckPoint, createModuleFromSource
 ### Attribute definitions
 - `clang/include/clang/Basic/Attr.td` — TableGen definition of CountedByAttr
 - `clang/lib/Sema/SemaDeclAttr.cpp` — semantic validation of __counted_by
+  (NOT ObjAttr.cpp — that file does not exist)
 
 ### Loop vectorizer / scalable vector bugs
 - `llvm/lib/Transforms/Vectorize/LoopVectorize.cpp`
+  - Search for `getVectorNumElements` — all call sites must guard with
+    `!VT.isScalableVector()` before calling
 - `llvm/lib/CodeGen/SelectionDAG/SelectionDAGTargetInfo.cpp`
 - `llvm/lib/Target/RISCV/RISCVISelLowering.cpp` — RVV lowering
 
 ### LLVM middle-end (attribute/metadata loss)
-- `llvm/lib/Transforms/Utils/InlineFunction.cpp`
+- `llvm/lib/Transforms/Utils/InlineFunction.cpp` — cloning drops metadata here
 - `llvm/lib/Transforms/InstCombine/InstCombineLoadStoreAlloca.cpp`
 - `llvm/lib/Analysis/ValueTracking.cpp` — `computeObjectSize()`
 
@@ -64,41 +69,52 @@ TextDiagnostic, highlightLines, CheckPoint, createModuleFromSource
 - `llvm/lib/LTO/LTO.cpp` — full LTO pipeline entry
 - `llvm/lib/Bitcode/Writer/BitcodeWriter.cpp` — attribute serialisation into bc
 
-### Diagnostic renderer
-- `clang/lib/Frontend/TextDiagnostic.cpp` — `highlightLines()` does syntax
-  highlighting using preprocessor checkpoints; crash here often means a
-  parent/child CompilerInstance FileID mismatch (see below)
-- `clang/lib/Frontend/TextDiagnosticPrinter.cpp` — constructs `TextDiagnostic`
-  with a `Preprocessor*` at startup; that PP is reused for all diagnostics
-  including those from child module compilations
-
 ## DO NOT HALLUCINATE THESE — they do not exist
 - `clang/lib/Sema/ObjAttr.cpp` — does not exist
 - `clang/lib/Analysis/ObjectSizeEvaluator.cpp` — does not exist
 - `clang/lib/Analysis/ObjectSizeOffsetEvaluator.cpp` — does not exist
 (The real file is clang/lib/Analysis/MemoryBuiltins.cpp for all of these)
 
+## Exact diagnosis: counted_by on non-dereferenced objects
+
+The divergence in `MemoryBuiltins.cpp` works like this:
+
+```
+__builtin_dynamic_object_size(p->fam, 1)   ← MemberExpr, isArrow()==true
+  → visitMember() sees pointer base
+  → calls getCountedBySize()  ✓  correct
+
+__builtin_dynamic_object_size(af.fam, 1)   ← MemberExpr, isArrow()==false
+  → visitMember() sees DeclRefExpr base (not a pointer dereref)
+  → falls through to visitDeclRefExpr()
+  → visitDeclRefExpr() returns static sizeof(af) or trailing-padding size  ✗ wrong
+```
+
+The fix: in `visitMember()` (or `visitDeclRefExpr()`), when the field has a
+`CountedByAttr`, call `getCountedBySize()` regardless of whether the base is
+a pointer. The base object (the struct instance) is accessible via the
+`DeclRefExpr`; its `count` field can be emitted as an lvalue load.
+
+## Useful debug commands (copy-pasteable)
+
+```bash
+# Dump AST to confirm MemberExpr node types
+clang -Xclang -ast-dump -fsyntax-only test.c 2>&1 | grep -A3 "MemberExpr\|DeclRefExpr"
+
+# Emit raw IR before any optimisation passes
+clang -O2 -Xclang -disable-llvm-passes -emit-llvm -S -o raw.ll test.c
+
+# Emit optimised IR for comparison
+clang -O2 -emit-llvm -S -o opt.ll test.c
+
+# Correct reproduce command for this bug
+clang -fsigned-char -fno-strict-aliasing -O1 test.c -o test && ./test
+
+# RISC-V RVV scalable vector
+clang -march=rv64gcv -mrvv-vector-bits=zvl128b -emit-llvm -S test.c
+```
+
 ## Common bug patterns
-
-### Parent/child CompilerInstance — FileID mismatch
-When `#pragma clang module build` is used, `createModuleFromSource` creates a
-child `CompilerInstance` whose diagnostics are forwarded to the parent's
-`TextDiagnosticPrinter` via `ForwardingDiagnosticConsumer`.
-
-**Critical:** FileIDs are per-`SourceManager` and NOT globally unique. FID=1
-in the parent may be `main.cpp`; FID=1 in the child is `B.map`. The parent's
-`TextDiagnosticPrinter` holds the parent's `Preprocessor*`, so when
-`highlightLines` calls `PP->getCheckPoint(child_FID, ...)` it looks up the
-wrong buffer entirely.
-
-Symptoms: assertion in `highlightLines` (`TextDiagnostic.cpp`) of the form
-`CheckPoint >= Buff->getBufferStart() && CheckPoint <= Buff->getBufferEnd()`
-only when `-fcolor-diagnostics` is active. Specifying `-std=c++XX` prevents
-the crash because module compilation is skipped.
-
-Stacktrace signature: `createModuleFromSource` or `HandlePragmaModuleBuild`
-appear in the frames above the crash site. The crash site (diagnostic renderer)
-and the fix site (parent/child PP boundary) are architecturally distant.
 
 ### Attribute loss during optimisation
 Attributes on IR values are silently dropped when:
@@ -110,55 +126,41 @@ Diagnostic: diff `raw.ll` vs `opt.ll`, search for missing `!annotation` nodes.
 ### Scalable vector type confusion
 `EVT::getVectorNumElements()` hard-asserts on scalable vectors.
 Guard pattern: `if (!VT.isScalableVector()) { ... getVectorNumElements() ... }`
+Appears in loop vectoriser cost models and SelectionDAG legalisers.
 
 ### LTO-only crashes
 Module re-optimised post-link. Causes:
 1. Per-TU assumption breaks cross-TU (inlining exposes UB hidden by ABI boundary)
-2. Attribute/annotation not serialised into bitcode
+2. Attribute/annotation not serialised into bitcode → lost at link time
 
-## Patch completeness requirements
-A draft patch is NOT a mergeable patch. Every LLVM/Clang PR must include:
-
-### Tests are mandatory
-- Every fix needs a test that exercises the fixed code path
-- Reviewers WILL request tests — flag this in the diagnosis, not after PR submission
-
-### Test locations by fix type
-- `clang/test/CodeGen/` — codegen regression tests (IR output checks)
+## Key test directories
+- `clang/test/CodeGen/` — codegen regression tests (add new test here for bdos fix)
 - `clang/test/Analysis/` — static analysis tests
-- `clang/test/Sema/` — semantic / attribute validation, error message checks
-- `clang/test/Frontend/` — frontend pipeline tests
-- `clang/unittests/Frontend/` — C++ unit tests for frontend internals
-- `llvm/test/Transforms/` — optimisation pass tests (FileCheck on .ll input)
+- `clang/test/Sema/` — semantic / attribute validation tests
+- `llvm/test/Transforms/` — optimisation pass tests
 
-### Test format
-- `.c`/`.cpp` input with `// RUN:` lines invoking clang, checked with FileCheck
-- For crash bugs: test must trigger crash on unfixed code and pass on fixed code
+## Subject matter experts (GitHub handles)
+- `@bwendling`      — object size, counted_by (primary contact for this bug)
+- `@nickdesaulniers` — clang frontend, kernel compatibility
+- `@topperc`        — RISC-V backend, RVV
+- `@fhahn`          — loop vectorizer
+- `@arsenm`         — generic IR, AMDGPU
 
-### Fuzzer-triggered bugs — extra scrutiny required
-- Before writing a fix, verify the bug is reachable in normal usage
-- Ask: "Can a caller ever pass NULL/invalid input here in non-fuzzer usage?"
-- If no: the fix may be unnecessary; a test proving unreachability is more
-  valuable than a defensive null check
-
-### Frontend crash fixes (CompilerInstance, PreprocessorOptions)
-- Check all callers before adding a null guard
-- If callers guarantee non-null by construction, the null check is dead code
-
-## Useful debug commands
-```bash
-# Dump AST
-clang -Xclang -ast-dump -fsyntax-only test.c 2>&1 | grep -A3 "MemberExpr\|DeclRefExpr"
-
-# Raw vs optimised IR comparison
-clang -O2 -Xclang -disable-llvm-passes -emit-llvm -S -o raw.ll test.c
-clang -O2 -emit-llvm -S -o opt.ll test.c
-
-# Trigger diagnostic renderer bugs (required for highlightLines crashes)
-clang -fcolor-diagnostics test.cpp
-```
 
 ## Crash issues
+
+### crash-on-invalid pattern
+For `crash-on-invalid` bugs, the preferred fix location is where the invalid
+code should have been **rejected earlier**, not where the crash fires.
+
+Before adding a null check or guard at the assertion/crash site:
+1. Ask: is this code path reachable through **valid** code?
+2. If yes: a guard at the crash site is appropriate
+3. If no (only reachable via invalid input): find the earlier point where the
+   invalid code should have been rejected and fix it there instead
+
+Reviewers will ask this question before accepting a defensive null check.
+A guard at the assertion is a last resort — the real fix is an earlier bailout.
+
 See crash diagnosis rules in the system prompt (prepended automatically for crash issues).
-Key files: `clang/lib/Frontend/CompilerInstance.cpp`, `clang/lib/AST/ExprConstant.cpp`,
-`clang/lib/Frontend/TextDiagnostic.cpp` (for module build / diagnostic renderer crashes)
+Key files: `clang/lib/Frontend/CompilerInstance.cpp`, `clang/lib/AST/ExprConstant.cpp`

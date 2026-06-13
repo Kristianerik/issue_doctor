@@ -43,7 +43,7 @@ except ImportError:
     SQLITE_VEC_AVAILABLE = False
 
 import config
-from diagnosis import check_ollama, get_commit_history_context, get_issue_text, get_missing_cited_files, get_related_issues_context, investigate_crash_issue, save_report, stream_diagnosis, validate_confidence
+from diagnosis import check_ollama, get_commit_history_context, get_godbolt_context, get_issue_text, get_missing_cited_files, get_related_issues_context, get_test_coverage_context, investigate_crash_issue, save_report, stream_diagnosis, validate_confidence
 from prompt import build_system_prompt, get_skill_keywords, load_all_skills, resolve_skills
 from query import resolve_repo_context
 from rag import check_embed_model_availability, embed_files_on_demand, hybrid_retrieve, format_retrieved_chunks
@@ -132,6 +132,10 @@ def main():
         issue_text, all_skills, forced, is_interactive, repo_root=repo_root_path)
     skill_keywords = get_skill_keywords(all_skills, skill_names)
 
+    godbolt_context = get_godbolt_context(issue_text)
+    if godbolt_context:
+        console.print("[dim]Godbolt reproducer fetched[/]")
+
     repo_context, used_rag, rag_conn, repo_root, retrieved_files = resolve_repo_context(
         args, issue_text, skill_contents, skill_keywords)
 
@@ -140,12 +144,15 @@ def main():
     commit_context = get_commit_history_context(retrieved_files, repo_root)
     related_context = get_related_issues_context(
         issue_text, retrieved_files, args.url or "")
+    test_context = get_test_coverage_context(issue_text, retrieved_files, repo_root)
 
     system_prompt = build_system_prompt(
         skill_contents, repo_context, used_rag,
         issue_text=issue_text, crash_context=crash_context,
         commit_context=commit_context,
-        related_issues_context=related_context)
+        related_issues_context=related_context,
+        test_coverage_context=test_context,
+        godbolt_context=godbolt_context)
     diagnosis = stream_diagnosis(issue_text, system_prompt)
     diagnosis = validate_confidence(diagnosis, repo_context)
 
@@ -173,11 +180,14 @@ def main():
                     commit_context = get_commit_history_context(retry_files, repo_root)
                     related_context = get_related_issues_context(
                         issue_text, retry_files, args.url or "")
+                    test_context = get_test_coverage_context(issue_text, retry_files, repo_root)
                     system_prompt = build_system_prompt(
                         skill_contents, repo_context, used_rag,
                         issue_text=issue_text, crash_context=crash_context,
                         commit_context=commit_context,
-                        related_issues_context=related_context)
+                        related_issues_context=related_context,
+                        test_coverage_context=test_context,
+                        godbolt_context=godbolt_context)
                     console.print("[bold cyan]Re-diagnosing with retrieved source...[/]")
                     diagnosis = stream_diagnosis(issue_text, system_prompt)
                     diagnosis = validate_confidence(diagnosis, repo_context)
